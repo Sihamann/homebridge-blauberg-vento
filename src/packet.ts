@@ -4,6 +4,12 @@ const MAX_PACKET_SIZE = 256;
 const PACKET_START = 0xFD;
 const PROTOCOL_TYPE = 0x02;
 
+// Special bytes within the data block of a packet
+const SPECIAL_PAGE = 0xFF; // next byte: high byte (page) of the following parameter numbers
+const SPECIAL_FUNCTION = 0xFC; // next byte: function for the following parameters
+const SPECIAL_SIZE = 0xFE; // next byte: value size of the following parameter
+const SPECIAL_UNSUPPORTED = 0xFD; // next byte: parameter not supported by the device
+
 const TEXT_ENCODER = new TextEncoder();
 const TEXT_DECODER = new TextDecoder();
 
@@ -25,14 +31,16 @@ export class Packet {
     bytes[i++] = PROTOCOL_TYPE;
 
     // Device ID
-    bytes[i++] = this.deviceId.length;
-    bytes.set(TEXT_ENCODER.encode(this.deviceId), i);
-    i += this.deviceId.length;
+    const deviceId = TEXT_ENCODER.encode(this.deviceId);
+    bytes[i++] = deviceId.length;
+    bytes.set(deviceId, i);
+    i += deviceId.length;
 
     // Password
-    bytes[i++] = this.password.length;
-    bytes.set(TEXT_ENCODER.encode(this.password), i);
-    i += this.password.length;
+    const password = TEXT_ENCODER.encode(this.password);
+    bytes[i++] = password.length;
+    bytes.set(password, i);
+    i += password.length;
 
     // Function
     bytes[i++] = this.func;
@@ -51,51 +59,77 @@ export class Packet {
   }
 
   public static fromBytes(bytes: Uint8Array): Packet {
+    const end = bytes.length - 2; // position of checksum
     let i = 0;
 
+    const next = (): number => {
+      if (i >= end) {
+        throw new Error('Invalid packet: unexpected end of data');
+      }
+      return bytes[i++];
+    };
+
     // Header
-    if (bytes[i++] !== PACKET_START || bytes[i++] !== PACKET_START || bytes[i++] !== PROTOCOL_TYPE) {
-      throw new Error('Invalid packet header: ' + bytes.subarray(0, 3));
+    if (bytes.length < 8 || bytes[i++] !== PACKET_START || bytes[i++] !== PACKET_START || bytes[i++] !== PROTOCOL_TYPE) {
+      throw new Error('Invalid packet header: ' + Array.from(bytes.subarray(0, 3)));
     }
 
     // Device ID
-    const deviceIdSize = bytes[i++];
+    const deviceIdSize = next();
     const deviceId = TEXT_DECODER.decode(bytes.subarray(i, i + deviceIdSize));
     i += deviceIdSize;
 
     // Password
-    const passwordSize = bytes[i++];
+    const passwordSize = next();
     const password = TEXT_DECODER.decode(bytes.subarray(i, i + passwordSize));
     i += passwordSize;
 
     // Function
-    if (bytes[i++] !== FuncType.RESPONSE) {
-      throw new Error('Invalid packet function: ' + bytes[i - 1]);
+    const func = next();
+    if (func !== FuncType.RESPONSE) {
+      throw new Error('Invalid packet function: ' + func);
     }
 
     // Data
     const dataBlocks: DataBlock[] = [];
-    while (i < bytes.length - 2) {
-      if (bytes[i] === 0xFE) {
-        i++;// skip special command
-        const paramSize = bytes[i++];
-        const param = bytes[i++];
-        const data = bytes.subarray(i, i += paramSize);
-
-        dataBlocks.push(new DataBlock(param, undefined, data));
+    let page = 0;
+    while (i < end) {
+      const b = next();
+      if (b === SPECIAL_PAGE) {
+        page = next();
+      } else if (b === SPECIAL_FUNCTION) {
+        next(); // function change is not relevant for responses
+      } else if (b === SPECIAL_UNSUPPORTED) {
+        dataBlocks.push(new DataBlock((page << 8) | next(), undefined, undefined, true));
+      } else if (b === SPECIAL_SIZE) {
+        const size = next();
+        const param = (page << 8) | next();
+        if (i + size > end) {
+          throw new Error('Invalid packet: unexpected end of data');
+        }
+        const data = bytes.slice(i, i += size);
+        dataBlocks.push(new DataBlock(param, size === 1 ? data[0] : undefined, data));
       } else {
-        dataBlocks.push(new DataBlock(bytes[i++], bytes[i++]));
+        const param = (page << 8) | b;
+        dataBlocks.push(new DataBlock(param, next()));
       }
     }
 
     // Checksum
-    const calculated = Packet.checksum(bytes.subarray(2, i));
-    const actual = [bytes[i++], bytes[i]];
+    const calculated = Packet.checksum(bytes.subarray(2, end));
+    const actual = [bytes[end], bytes[end + 1]];
     if (calculated[0] !== actual[0] || calculated[1] !== actual[1]) {
       throw new Error('Invalid packet checksum. Expected: ' + calculated + '. Actual: ' + actual);
     }
 
     return new Packet(deviceId, password, FuncType.RESPONSE, dataBlocks);
+  }
+
+  /**
+   * Returns the data block of the given parameter, if the device has returned a supported value for it.
+   */
+  public get(parameter: Parameter): DataBlock | undefined {
+    return this.data.find(block => block.parameter === parameter && !block.unsupported);
   }
 
   private static checksum(bytes: Uint8Array): number[] {
@@ -153,6 +187,7 @@ export enum FilterReplacementIndicator {
 export class DataBlock {
   constructor(public readonly parameter: Parameter,
     public readonly value?: number,
-    public readonly data?: Uint8Array) {
+    public readonly data?: Uint8Array,
+    public readonly unsupported: boolean = false) {
   }
 }
