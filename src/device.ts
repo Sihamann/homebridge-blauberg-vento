@@ -19,9 +19,9 @@ export class DeviceStatus {
   constructor(
     public readonly active: UnitOnOff,
     public readonly speed: SpeedNumber,
-    public readonly humidity: number,
-    public readonly mode: VentilationMode,
-    public readonly alarm: AlarmWarningIndicator,
+    public readonly humidity: number | undefined,
+    public readonly mode: VentilationMode | undefined,
+    public readonly alarm: AlarmWarningIndicator | undefined,
     public readonly filter: FilterStatus,
   ) {
   }
@@ -29,8 +29,8 @@ export class DeviceStatus {
 
 export class FilterStatus {
   constructor(
-    public readonly life: number,
-    public readonly replace: FilterReplacementIndicator,
+    public readonly life: number | undefined,
+    public readonly replace: FilterReplacementIndicator | undefined,
   ) {
   }
 }

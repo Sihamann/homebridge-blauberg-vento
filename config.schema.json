@@ -41,7 +41,7 @@
               "title": "Password",
               "type": "string",
               "required": true,
-              "pattern": "^[A-z\\d]{1,8}$",
+              "pattern": "^[A-Za-z\\d]{1,8}$",
               "minLength": 1,
               "maxLength": 8,
               "default": "1111",

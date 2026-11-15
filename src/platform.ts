@@ -10,6 +10,7 @@ export class BlaubergVentoPlatform implements DynamicPlatformPlugin {
 
   public readonly accessories: Map<string, PlatformAccessory> = new Map();
   public readonly discoveredCacheUUIDs: string[] = [];
+  private readonly handlers: VentoExpertAccessory[] = [];
 
   constructor(
     public readonly log: Logging,
@@ -26,6 +27,8 @@ export class BlaubergVentoPlatform implements DynamicPlatformPlugin {
 
       this.discoverDevices();
     });
+
+    this.api.on('shutdown', () => this.handlers.forEach(handler => handler.shutdown()));
   }
 
   configureAccessory(accessory: PlatformAccessory) {
@@ -34,9 +37,25 @@ export class BlaubergVentoPlatform implements DynamicPlatformPlugin {
   }
 
   discoverDevices() {
-    if (this.config.devices) {
-      this.config.devices.forEach((device: Partial<Device>) => this.configureDevice(new Device(device)));
-    }
+    const devices: Partial<Device>[] = Array.isArray(this.config.devices) ? this.config.devices : [];
+    devices.forEach((config, index) => {
+      if (!config?.ip || !config.deviceId || !config.password) {
+        this.log.error(`Device #${index + 1} (${config?.name ?? 'no name'}) skipped: ip, deviceId and password are required`);
+        return;
+      }
+
+      const device = new Device({ ...config, name: config.name || config.deviceId });
+      if (this.discoveredCacheUUIDs.includes(this.api.hap.uuid.generate(device.deviceId))) {
+        this.log.error(`Device #${index + 1} (${device.name}) skipped: duplicate deviceId ${device.deviceId}`);
+        return;
+      }
+
+      try {
+        this.configureDevice(device);
+      } catch (error) {
+        this.log.error(`Device #${index + 1} (${device.name}) could not be configured: ${(error as Error).message}`);
+      }
+    });
 
     for (const [uuid, accessory] of this.accessories) {
       if (!this.discoveredCacheUUIDs.includes(uuid)) {
@@ -52,11 +71,11 @@ export class BlaubergVentoPlatform implements DynamicPlatformPlugin {
 
     if (existingAccessory) {
       this.log.info('Restoring existing accessory from cache:', existingAccessory.displayName);
-      new VentoExpertAccessory(this, existingAccessory, device);
+      this.handlers.push(new VentoExpertAccessory(this, existingAccessory, device));
     } else {
       this.log.info('Adding new accessory:', device.name);
       const accessory = new this.api.platformAccessory(device.name, uuid);
-      new VentoExpertAccessory(this, accessory, device);
+      this.handlers.push(new VentoExpertAccessory(this, accessory, device));
       this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
     }
 

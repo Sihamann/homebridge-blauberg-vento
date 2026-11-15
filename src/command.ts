@@ -4,18 +4,10 @@ import { DataBlock, FuncType, Packet, Parameter, SpeedNumber, UnitOnOff, Ventila
 const PORT = 4000;
 
 export class Command {
-  private socket: Socket;
-
-  private complete?: (value: Packet) => void;
-  private fail?: (error: Error) => void;
-
   private constructor(
     private readonly func: FuncType,
     private readonly data: DataBlock[],
   ) {
-    this.socket = createSocket('udp4')
-      .on('message', this.response.bind(this))
-      .on('error', this.cancel.bind(this));
   }
 
   public static status() {
@@ -42,34 +34,59 @@ export class Command {
     return new Command(FuncType.WRITE, [new DataBlock(Parameter.VENTILATION_MODE, value)]);
   }
 
-  public async execute(ip: string, deviceId: string, password: string): Promise<Packet> {
+  /**
+   * Sends the command to the device and waits for its response.
+   * The socket is always closed and the promise always settled, either by a response, an error or the timeout.
+   */
+  public execute(ip: string, deviceId: string, password: string, timeout: number): Promise<Packet> {
     return new Promise((resolve, reject) => {
-      this.complete = resolve;
-      this.fail = reject;
+      let socket: Socket | undefined;
+      let settled = false;
+      let timer: NodeJS.Timeout | undefined = undefined;
+
+      const finish = (error?: Error, packet?: Packet) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        try {
+          socket?.close();
+        } catch {
+          // socket already closed
+        }
+        if (error) {
+          reject(error);
+        } else {
+          resolve(packet!);
+        }
+      };
+
+      timer = setTimeout(() => finish(new Error('Command timeout')), timeout);
 
       try {
-        const request = new Packet(deviceId, password, this.func, this.data);
-        this.socket.connect(PORT, ip, () => this.socket.send(request.toBytes()));
-      } catch (e) {
-        this.cancel();
+        const request = new Packet(deviceId, password, this.func, this.data).toBytes();
+        socket = createSocket('udp4')
+          .on('error', error => finish(error))
+          .on('message', message => {
+            try {
+              const response = Packet.fromBytes(message);
+              if (response.deviceId !== deviceId) {
+                throw new Error(`Unexpected device ID in response: ${response.deviceId}`);
+              }
+              finish(undefined, response);
+            } catch (error) {
+              finish(error as Error);
+            }
+          });
+        socket.connect(PORT, ip, () => socket!.send(request, error => {
+          if (error) {
+            finish(error);
+          }
+        }));
+      } catch (error) {
+        finish(error as Error);
       }
     });
-  }
-
-  public cancel(reason?: Error) {
-    this.close();
-    this.fail?.(reason || new Error());
-  }
-
-  private response(message: Buffer) {
-    this.close();
-    this.complete?.(Packet.fromBytes(message));
-  }
-
-  private close() {
-    try {
-      this.socket.close();
-    } catch (e) {// ignore
-    }
   }
 }
